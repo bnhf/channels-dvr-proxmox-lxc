@@ -10,7 +10,7 @@
 #   * /channels-data is created empty and selected later from the web UI
 #   * Optional Google Chrome (required for TV Everywhere logins)
 #   * Optional Samba shares for /channels-dvr and /channels-data
-#   * Windows network discovery via wsdd2 (Samba implements no WS-Discovery)
+#   * Windows network discovery via wsdd (Samba implements no WS-Discovery)
 #   * Intel Quick Sync (VA-API) detection and reporting
 #
 # The script is idempotent: re-running it will update configuration without
@@ -65,9 +65,18 @@ readonly SMB_CHANNELS_CONF="/etc/samba/smb-channels.conf"
 readonly SMB_INCLUDE_LINE="include = ${SMB_CHANNELS_CONF}"
 readonly SMB_INCLUDE_MARKER="# --- Channels DVR shares (managed by ${SCRIPT_NAME}) ---"
 
-# Windows discovery daemon. Debian 13 ships 'wsdd2'; the Python 'wsdd' package
-# was removed from Trixie and exists only in bookworm, forky and sid.
-readonly WSDD_PACKAGE="wsdd2"
+# Windows discovery daemon. Trixie's native 'wsdd2' puts its WS-Discovery
+# metadata endpoint on TCP 3702 instead of the standard TCP 5357; Windows'
+# built-in "Network Discovery" firewall rule never allows that port outbound,
+# so wsdd2 answers every Probe correctly but Explorer still never shows the
+# share. The Python 'wsdd' package uses the standard port and works, but was
+# removed from Trixie's own repos, so it is pulled from Bookworm instead - the
+# newest suite that still ships it - pinned so nothing else ever resolves
+# from that suite (see ensure_wsdd_source).
+readonly WSDD_PACKAGE="wsdd"
+readonly WSDD_PIN_SUITE="bookworm"
+readonly WSDD_SOURCE="/etc/apt/sources.list.d/wsdd-${WSDD_PIN_SUITE}.sources"
+readonly WSDD_PREFERENCES="/etc/apt/preferences.d/wsdd-${WSDD_PIN_SUITE}"
 
 # Official Tailscale installer (adds the repo and installs the package).
 readonly TAILSCALE_INSTALL_URL="https://tailscale.com/install.sh"
@@ -814,18 +823,58 @@ restart_samba() {
 }
 
 # ---------------------------------------------------------------------------
-# Windows network discovery (wsdd2)
+# Windows network discovery (wsdd)
 # ---------------------------------------------------------------------------
 
 # Samba implements no WS-Discovery responder, and modern Windows no longer uses
 # the NetBIOS browsing that nmbd provides. Without a WSD daemon the shares work
 # perfectly by UNC path but never appear under "Network" in Explorer.
 #
-# Note the package name: the Python 'wsdd' package was removed from Debian 13,
-# so Trixie ships 'wsdd2' (the C implementation) instead.
+# wsdd is not in Trixie's own repos (see the comment on WSDD_PACKAGE), so pull
+# it from Bookworm - but pin that source so ONLY wsdd may ever resolve from
+# it. Without the pin, adding a second suite risks a future package silently
+# resolving from Bookworm instead of Trixie (a "FrankenDebian" mix); Debian
+# version ordering makes this unlikely here since Bookworm is older, but the
+# pin costs nothing and removes the risk entirely.
+ensure_wsdd_source() {
+    local desired desired_pref
+
+    install -d -m 0755 "$(dirname "${WSDD_SOURCE}")"
+
+    desired="Types: deb
+URIs: http://deb.debian.org/debian
+Suites: ${WSDD_PIN_SUITE}
+Components: main
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg"
+
+    if [[ ! -f "${WSDD_SOURCE}" ]] || [[ "$(cat "${WSDD_SOURCE}")" != "${desired}" ]]; then
+        printf '%s\n' "${desired}" > "${WSDD_SOURCE}"
+        chmod 0644 "${WSDD_SOURCE}"
+        msg_ok "Added ${WSDD_PIN_SUITE} as a package source (for '${WSDD_PACKAGE}' only)."
+        apt_refresh force
+    else
+        msg_ok "${WSDD_PIN_SUITE} source already configured."
+    fi
+
+    desired_pref="Package: *
+Pin: release n=${WSDD_PIN_SUITE}
+Pin-Priority: 1
+
+Package: ${WSDD_PACKAGE}
+Pin: release n=${WSDD_PIN_SUITE}
+Pin-Priority: 990"
+
+    if [[ ! -f "${WSDD_PREFERENCES}" ]] || [[ "$(cat "${WSDD_PREFERENCES}")" != "${desired_pref}" ]]; then
+        printf '%s\n' "${desired_pref}" > "${WSDD_PREFERENCES}"
+        chmod 0644 "${WSDD_PREFERENCES}"
+        msg_ok "Pinned '${WSDD_PACKAGE}' to ${WSDD_PIN_SUITE}; nothing else may resolve from it."
+    fi
+}
+
 configure_wsdd() {
     section "Configuring Windows network discovery"
 
+    ensure_wsdd_source
     apt_refresh
 
     # Never fatal: a missing package should not abort an otherwise good install.
@@ -850,7 +899,6 @@ configure_wsdd() {
     else
         WSDD_STATUS="installed, but not running"
         msg_warn "${WSDD_PACKAGE} is installed but not active - file sharing is unaffected."
-        msg_warn "A common cause is LLMNR port 5355 already being bound by systemd-resolved."
         msg_warn "Inspect with: journalctl -u ${WSDD_PACKAGE} -n 20 --no-pager"
     fi
 }
