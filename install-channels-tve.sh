@@ -709,7 +709,7 @@ ensure_samba_user() {
 
 # Adds or updates the Samba account, then makes sure it is enabled.
 ensure_samba_account() {
-    if pdbedit -L 2>/dev/null | cut -d: -f1 | grep -qx "${SAMBA_USER}"; then
+    if pdbedit -L 2>/dev/null | cut -d: -f1 | grep -x "${SAMBA_USER}" >/dev/null; then
         msg_info "Updating Samba password for '${SAMBA_USER}'..."
     else
         msg_info "Creating Samba account for '${SAMBA_USER}'..."
@@ -829,7 +829,10 @@ configure_wsdd() {
     apt_refresh
 
     # Never fatal: a missing package should not abort an otherwise good install.
-    if ! apt-cache policy "${WSDD_PACKAGE}" 2>/dev/null | grep -qE '^[[:space:]]*Candidate:[[:space:]]*[0-9]'; then
+    # grep must not exit early (-q) here: apt-cache policy writes the
+    # Candidate line before its (longer) version table, and pipefail turns an
+    # early grep exit into a false failure when apt-cache is SIGPIPE'd mid-write.
+    if ! apt-cache policy "${WSDD_PACKAGE}" 2>/dev/null | grep -E '^[[:space:]]*Candidate:[[:space:]]*[0-9]' >/dev/null; then
         WSDD_STATUS="unavailable (no '${WSDD_PACKAGE}' candidate)"
         msg_warn "Package '${WSDD_PACKAGE}' is not available; shares will work by UNC path but will not appear in Explorer's Network view."
         return 0
