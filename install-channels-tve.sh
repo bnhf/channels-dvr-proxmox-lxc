@@ -307,6 +307,14 @@ apt_install() {
     msg_ok "Installed: ${missing[*]}"
 }
 
+update_system_packages() {
+    section "Updating the LXC"
+    apt_refresh force
+    msg_info "Upgrading installed packages..."
+    DEBIAN_FRONTEND=noninteractive apt-get -y upgrade
+    msg_ok "System packages are up to date."
+}
+
 # ---------------------------------------------------------------------------
 # Interactive configuration (all questions are asked before anything changes)
 # ---------------------------------------------------------------------------
@@ -1026,6 +1034,7 @@ print_summary() {
 
 main() {
     preflight
+    update_system_packages
     collect_configuration
 
     configure_timezone
