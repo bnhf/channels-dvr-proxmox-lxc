@@ -70,13 +70,11 @@ readonly SMB_INCLUDE_MARKER="# --- Channels DVR shares (managed by ${SCRIPT_NAME
 # built-in "Network Discovery" firewall rule never allows that port outbound,
 # so wsdd2 answers every Probe correctly but Explorer still never shows the
 # share. The Python 'wsdd' package uses the standard port and works, but was
-# removed from Trixie's own repos, so it is pulled from Bookworm instead - the
-# newest suite that still ships it - pinned so nothing else ever resolves
-# from that suite (see ensure_wsdd_source).
+# removed from Trixie's own repos entirely - not even present as a candidate -
+# so it is fetched directly from the Debian archive pool, which still serves
+# old builds after a package is dropped from every active suite.
 readonly WSDD_PACKAGE="wsdd"
-readonly WSDD_PIN_SUITE="bookworm"
-readonly WSDD_SOURCE="/etc/apt/sources.list.d/wsdd-${WSDD_PIN_SUITE}.sources"
-readonly WSDD_PREFERENCES="/etc/apt/preferences.d/wsdd-${WSDD_PIN_SUITE}"
+readonly WSDD_DEB_URL="http://deb.debian.org/debian/pool/main/w/wsdd/wsdd_0.7.0-2.1_all.deb"
 
 # Official Tailscale installer (adds the repo and installs the package).
 readonly TAILSCALE_INSTALL_URL="https://tailscale.com/install.sh"
@@ -830,64 +828,32 @@ restart_samba() {
 # the NetBIOS browsing that nmbd provides. Without a WSD daemon the shares work
 # perfectly by UNC path but never appear under "Network" in Explorer.
 #
-# wsdd is not in Trixie's own repos (see the comment on WSDD_PACKAGE), so pull
-# it from Bookworm - but pin that source so ONLY wsdd may ever resolve from
-# it. Without the pin, adding a second suite risks a future package silently
-# resolving from Bookworm instead of Trixie (a "FrankenDebian" mix); Debian
-# version ordering makes this unlikely here since Bookworm is older, but the
-# pin costs nothing and removes the risk entirely.
-ensure_wsdd_source() {
-    local desired desired_pref
-
-    install -d -m 0755 "$(dirname "${WSDD_SOURCE}")"
-
-    desired="Types: deb
-URIs: http://deb.debian.org/debian
-Suites: ${WSDD_PIN_SUITE}
-Components: main
-Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg"
-
-    if [[ ! -f "${WSDD_SOURCE}" ]] || [[ "$(cat "${WSDD_SOURCE}")" != "${desired}" ]]; then
-        printf '%s\n' "${desired}" > "${WSDD_SOURCE}"
-        chmod 0644 "${WSDD_SOURCE}"
-        msg_ok "Added ${WSDD_PIN_SUITE} as a package source (for '${WSDD_PACKAGE}' only)."
-        apt_refresh force
-    else
-        msg_ok "${WSDD_PIN_SUITE} source already configured."
-    fi
-
-    desired_pref="Package: *
-Pin: release n=${WSDD_PIN_SUITE}
-Pin-Priority: 1
-
-Package: ${WSDD_PACKAGE}
-Pin: release n=${WSDD_PIN_SUITE}
-Pin-Priority: 990"
-
-    if [[ ! -f "${WSDD_PREFERENCES}" ]] || [[ "$(cat "${WSDD_PREFERENCES}")" != "${desired_pref}" ]]; then
-        printf '%s\n' "${desired_pref}" > "${WSDD_PREFERENCES}"
-        chmod 0644 "${WSDD_PREFERENCES}"
-        msg_ok "Pinned '${WSDD_PACKAGE}' to ${WSDD_PIN_SUITE}; nothing else may resolve from it."
-    fi
-}
-
+# wsdd is not in Trixie's own repos at all (see the comment on WSDD_PACKAGE),
+# so it can't be resolved through apt's normal index the way wsdd2 can - it is
+# downloaded directly from the Debian archive pool and installed as a local
+# .deb instead, letting apt still resolve its dependencies normally.
 configure_wsdd() {
     section "Configuring Windows network discovery"
 
-    ensure_wsdd_source
-    apt_refresh
+    if dpkg-query -W -f='${Status}' "${WSDD_PACKAGE}" 2>/dev/null | grep 'ok installed' >/dev/null; then
+        msg_ok "${WSDD_PACKAGE} is already installed."
+    else
+        local tmp_deb
+        tmp_deb="$(mktemp --suffix=.deb)"
 
-    # Never fatal: a missing package should not abort an otherwise good install.
-    # grep must not exit early (-q) here: apt-cache policy writes the
-    # Candidate line before its (longer) version table, and pipefail turns an
-    # early grep exit into a false failure when apt-cache is SIGPIPE'd mid-write.
-    if ! apt-cache policy "${WSDD_PACKAGE}" 2>/dev/null | grep -E '^[[:space:]]*Candidate:[[:space:]]*[0-9]' >/dev/null; then
-        WSDD_STATUS="unavailable (no '${WSDD_PACKAGE}' candidate)"
-        msg_warn "Package '${WSDD_PACKAGE}' is not available; shares will work by UNC path but will not appear in Explorer's Network view."
-        return 0
+        # Never fatal: a failed download should not abort an otherwise good install.
+        if ! curl -fsSL -o "${tmp_deb}" "${WSDD_DEB_URL}"; then
+            rm -f "${tmp_deb}"
+            WSDD_STATUS="unavailable (failed to download ${WSDD_PACKAGE})"
+            msg_warn "Could not download ${WSDD_PACKAGE} from ${WSDD_DEB_URL}; shares will work by UNC path but will not appear in Explorer's Network view."
+            return 0
+        fi
+
+        msg_info "Installing ${WSDD_PACKAGE} from ${WSDD_DEB_URL}..."
+        DEBIAN_FRONTEND=noninteractive apt-get install -y "${tmp_deb}"
+        rm -f "${tmp_deb}"
+        msg_ok "${WSDD_PACKAGE} installed."
     fi
-
-    apt_install "${WSDD_PACKAGE}"
 
     systemctl enable "${WSDD_PACKAGE}.service" >/dev/null 2>&1 || true
     systemctl restart "${WSDD_PACKAGE}.service" >/dev/null 2>&1 || true
