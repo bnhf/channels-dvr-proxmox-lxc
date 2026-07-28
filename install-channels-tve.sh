@@ -6,8 +6,11 @@
 # Debian 13 (Trixie), intended for use inside a Proxmox Debian LXC container.
 #
 #   * Native install (no Docker assumptions)
-#   * Channels DVR lives in /channels-dvr (untouched after extraction)
-#   * /channels-data is created empty and selected later from the web UI
+#   * Channels DVR lives in /channels-dvr; its engine data (database, guide
+#     data, tuner config) lives in /channels-dvr/data, matching the -dir
+#     argument the official Docker image passes
+#   * /channels-data is a separate empty directory, selected later from the
+#     web UI as the recordings / imported media location
 #   * Optional Google Chrome (required for TV Everywhere logins)
 #   * Optional Samba shares for /channels-dvr and /channels-data
 #   * Windows network discovery via wsdd (Samba implements no WS-Discovery)
@@ -41,7 +44,15 @@ readonly SCRIPT_NAME="${0##*/}"
 
 # Channels DVR application directory (created by the official installer).
 readonly CHANNELS_DIR="/channels-dvr"
-# Empty directory offered to the user for recordings / imported media.
+# Channels DVR's own internal data directory - database, guide data and tuner
+# configuration live here. The official installer creates it as a sibling of
+# the versioned binary directories, and the official Docker image's run.sh
+# passes this same path via -dir and runs with it as the working directory;
+# this script does the same for parity (see install_systemd_unit).
+readonly CHANNELS_ENGINE_DATA_DIR="${CHANNELS_DIR}/data"
+# Separate, empty directory offered to the user for recordings / imported
+# media - unrelated to CHANNELS_ENGINE_DATA_DIR above, selected later from the
+# web UI.
 readonly CHANNELS_DATA_DIR="/channels-data"
 
 # Runtime configuration consumed by the systemd unit.
@@ -568,6 +579,16 @@ install_channels_dvr() {
         msg_warn "Using ${CHANNELS_BINARY}; the 'latest' symlink is missing, so the unit may need editing after a self-update."
     fi
 
+    # Engine data directory: the official installer already creates this as a
+    # sibling of the versioned binary directories, but ensure it exists here
+    # too in case a re-run skipped the download step entirely.
+    if [[ -d "${CHANNELS_ENGINE_DATA_DIR}" ]]; then
+        msg_ok "${CHANNELS_ENGINE_DATA_DIR} already exists."
+    else
+        install -d -m 0775 -o root -g root "${CHANNELS_ENGINE_DATA_DIR}"
+        msg_ok "Created ${CHANNELS_ENGINE_DATA_DIR}."
+    fi
+
     # Data directory: created empty and never populated here. It is selected
     # from the Channels web UI as the recordings / imported media location.
     if [[ -d "${CHANNELS_DATA_DIR}" ]]; then
@@ -624,8 +645,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=${CHANNELS_DEFAULTS}
-WorkingDirectory=${CHANNELS_DIR}
-ExecStart=${CHANNELS_BINARY}
+WorkingDirectory=${CHANNELS_ENGINE_DATA_DIR}
+ExecStart=${CHANNELS_BINARY} -dir ${CHANNELS_ENGINE_DATA_DIR}
 Restart=always
 RestartSec=5
 TimeoutStopSec=30
